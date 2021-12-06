@@ -1,0 +1,339 @@
+---
+title: "Benchmarking Fake News"
+author: "James Hardaway"
+date: "`r format(Sys.Date(),'%B %e, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: yes
+    code_folding: show
+    code_download: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE)
+```
+
+## Introduction
+
+Discriminating between truth and fiction is becoming increasingly difficult in the age of ubiquitous digital information. From national politics to the current COVID-19 pandemic, understanding who or what to believe impacts our lives daily. While I can still remember the days of hard copy periodicals, books, and the library's card catalog, today's students and young professionals have grown up in an almost exclusively digital world. The digital generation is quite comfortable engaging online as much if not more than in the real world, but their ability to recognize the quality of information on their screens leaves much to be desired.
+
+In the 18 months leading up to the 2016 presidential election, Stanford University commissioned a [study](https://stacks.stanford.edu/file/druid:fv751yt5934/SHEG%20Evaluating%20Information%20Online.pdf) to evaluate U.S. students' ability to distinguish between factual media articles and politically biased or manufactured stories. The results were not flattering. Stanford followed up that study with a national [survey](https://stacks.stanford.edu/file/druid:gf151tb4868/Civic%20Online%20Reasoning%20National%20Portrait.pdf) that culminated in 2019 with equally dismal results. Most students struggled, with close to 90% failing four of the six survey tasks. The study concluded, unsurprisingly, that technology is evolving faster than our educational institutions can adapt.
+
+Post-election, studies on how to identify and mitigate the threat of inaccurate media gained steam as the term "fake news" began trending. In December 2016, an entrepreneur/ professor (Dean Pomerleau) and an artificial intelligence researchers (Delip Rao) organized a competition to develop software tools to aid fact checkers in identifying online hoaxes and misinformation ([fakenewschallenge.org](https://fakenewschallenge.org/)). The event eventually brought together more than 100 volunteers and 71 teams globally vying for a nominal cash prize. Their contest highlighted the difficulty with applying broad labels of true and false to nuanced news media, so they instead settled on a "stance detection" methodology, that aimed to identify how various media sources reported on specific topics or news stories. These "stances" assisted fact checkers (and the public) in understanding which media sources were more reliable, a key first step in mitigating the spread of misinformation.
+
+## Prepare
+
+An inability to recognize fake news is only getting more difficult as gigs of data are created by the hour that are never reviewed by an editor, proofreader, or certified publisher. It's easy to see how one can get overwhelmed by the sheer volume of information we wade through in a day online. A key recommendation out of the Stanford study is for there to be a fundamental shift to increase digital literacy instruction at all levels of education. This problem is the driving force behind the key question this case study is attempting to address: ***Can technology automate the process of recognizing misinformation in online media?***
+
+This case study will examine how text mining with automated software tools can help uncover patterns that are easy to miss as we manually peruse online articles. The two categories of text mining most closely aligned to my research question are information extraction and document classification. Extraction seeks to identify key pieces of information, such as locations, dates, and addresses that can by analyzed as structured data. Alternatively, classification seeks to categorize a document or piece of unstructured text based on word choice and can be used to analyze sentiment or discussion topics. Sentiment analysis attempts to understand the attitude of a given text towards a specific topic. This method works well to determine bias in phrasing. Topic detection attempts to identify subjects or themes in a body of text. Since my challenge is to identify truth versus fiction, I decided to explore both sentiment and topic analysis in this project. Understanding how software applications can do this could be extremely relevant for educators as well as anyone working in the field of digital media production. In addition to the technical implications, this field of research has the potential to shed light on how news media is categorized, titled, and promoted to either highlight or hide its true character.
+
+In this project, we will use data from [this study](chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/viewer.html?pdfurl=https%3A%2F%2Fsites.cs.ucsb.edu%2F~william%2Fpapers%2Facl2017.pdf&clen=220327&chunk=true) by [William Y. Wang](https://sites.cs.ucsb.edu/~william/) designed to assist fact checkers and serve as a benchmark for fake news detection. The study authors developed the *LIAR* dataset as part of a 10-yr project where fact checkers manually labeled news stories collected in various contexts from [Politifact.com](https://politifact.com). The specific data (publicly available [here](https://www.cs.ucsb.edu/~william/data/liar_dataset.zip)) was originally labeled as the training data and is comprised of over 10,000 instances with 14 variables. From the author's *ReadMe* file (part of the data download), the variables are defined as follows:
+
+![](images/liar_variables.png "LIAR Dataset Variables")
+
+Prior to importing the data, we should install and load the packages we'll need for our data transformation and initial visualizations:
+
+```{r, echo = TRUE, message=FALSE}
+# Install and load packages
+library(rmarkdown)
+library(knitr)
+library(tidyverse)
+library(here)
+library(tidytext)
+library(wordcloud2)
+library(vader)
+library(colorspace)
+library(scales)
+```
+
+## Wrangle
+
+We begin the case study by importing and reviewing the training dataset that's been downloaded from Professor Wang's portal:
+
+```{r, echo = TRUE, message=FALSE}
+# Import LIAR dataset and view header rows
+liar_data <- read.csv(here("Liar_train.csv"))
+paged_table(head(liar_data))
+```
+
+As you can see from the data frame this creates, the original file is imported without any column labels. We will fix that, so that our columns have titles that will act as variables for exploratory analysis. We also have this annoying feature in the "ID" column where every entry contains ".json" after the number. Let's remove that so our ID #s are simpler:
+
+```{r}
+# Modify column labels and ID entries
+colnames(liar_data) <- c("ID", "Label", "Statement", "Subject",
+                         "Speaker", "Position", "State", "Party",
+                         "Barely True", "False", "Half True",
+                         "Mostly True", "Pants on Fire", "Venue")
+liar_data$ID <- gsub(".json", "", as.character(liar_data$ID))
+paged_table(head(liar_data))
+```
+
+The last item of pre-processing includes two steps that will prepare our data for sentiment analysis: tokenization and stop word removal.
+
+```{r}
+# Tokenize Statement text
+statement_tokens <- liar_data %>% 
+  unnest_tokens(output = word,
+                input = Statement) %>% 
+  relocate(word)
+
+# Remove stop words
+tidy_liar <- anti_join(statement_tokens,
+                       stop_words,
+                       by = "word")
+```
+
+## Explore
+
+This section will use basic data visualization techniques to explore relationships within the data to provide insights into which variables indicate the potential for misinformation. In reviewing the tidied data frame, candidate variables ripe for visual analysis include party affiliation, number of articles by label, state affiliation, and historic averages. We'll begin with some basic graphs depicting the breadth and scope of the data:
+
+1.  **"Truthiness" Ratings.** Our main goal in this case study is to identify benchmarks for misinformation. A good starting point is to understand where our data falls on the rating scale between TRUE and FALSE. Politifact.com's Truth-O-Meter [ratings](https://www.politifact.com/article/2018/feb/12/principles-truth-o-meter-politifacts-methodology-i/#Truth-O-Meter%20ratings) are as follows:
+
+**TRUE** -- The statement is accurate and there's nothing significant missing.
+
+**MOSTLY TRUE** -- The statement is accurate but needs clarification or additional information.
+
+**HALF TRUE** -- The statement is partially accurate but leaves out important details or takes things out of context.
+
+**BARELY TRUE** -- The statement contains an element of truth but ignores critical facts that would give a different impression (originally listed as 'mostly false' but modified by the creator of the dataset).
+
+**FALSE** -- The statement is not accurate.
+
+**PANTS ON FIRE** -- The statement is not accurate and makes a ridiculous claim.
+
+```{r}
+liar_data %>% 
+  ggplot(aes(x = Label)) +
+  geom_bar() +
+  scale_x_discrete(limits = c("TRUE", 
+                            "mostly-true",
+                            "half-true",
+                            "barely-true",
+                            "FALSE",
+                            "pants-fire")) +
+  labs(x = "Truth-O-Meter", y = "Statement Count")
+```
+
+This bar chart indicates the data is relatively balanced across the 6 labels except for the most egregious category of *pants on fire* (POF). While most have from 1600 - 2000 statements, POF has \~ 800 statements.
+
+2.  **Most Discussed Issues.** Will be interesting to see if tone changes depending on the topic of discussion. First we'll tokenize the Subject column and then identify the most common discussion topics.
+
+```{r}
+# Review top 50 tokens for subjects
+subject_tokens <- liar_data %>% 
+  unnest_tokens(output = word,
+                input = Subject) %>% 
+  relocate(word)
+
+subject_top_tokens <- subject_tokens %>% 
+  count(word, sort = TRUE) %>% 
+  top_n(50)
+
+paged_table(subject_top_tokens)
+
+# Create word cloud for top subjects
+wordcloud2(subject_top_tokens, size = .5, shape = 'rectangle',
+           color = 'random-dark', backgroundColor = "black")
+```
+
+Now let's see how these topics align with the levels of truth:
+
+```{r}
+top_subjects <- c("health", "economy", "taxes", "education", "jobs")
+
+subject_tokens %>%
+  rename(Issue = word) %>%
+  filter(Issue %in% top_subjects) %>% 
+  ggplot(aes(y = Label, fill = Label)) +
+  geom_bar(show.legend = FALSE) +
+  facet_wrap(~ Issue) +
+  scale_y_discrete(limits = c("pants-fire", 
+                            "FALSE",
+                            "barely-true",
+                            "half-true",
+                            "mostly-true",
+                            "TRUE")) +
+  labs(y = "Truth-O-Meter", x = "Statement Count", subtitle = "Truth by Issue (Raw Count)") +
+  scale_fill_manual(values = c("pants-fire" = "red", "FALSE" = "orange", "barely-true" = "yellow", "half-true" = "yellowgreen", "mostly-true" = "green", "TRUE" = "blue"))
+```
+
+```{r}
+# Same query/plot, but by % of posts on that topic
+top5_subjects <- subject_tokens %>%
+  rename(Issue = word) %>%
+  filter(Issue %in% top_subjects) %>% 
+  group_by(Issue, Label) %>% 
+  summarize(cnt = n()) %>% 
+  mutate(freq = round(cnt / sum(cnt), 2)) %>% 
+  arrange(desc(freq)) 
+  
+top5_subjects %>%
+  ggplot(aes(x= Label, y = freq, fill = Label,)) +
+  geom_col() +
+  facet_grid(~ Issue) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(limits = c("TRUE", 
+                            "mostly-true",
+                            "half-true",
+                            "barely-true",
+                            "FALSE",
+                            "pants-fire")) +
+  labs(y = "% Statement Count", x = "", subtitle = "Truth by Issue (Relative %)") +
+  scale_fill_manual(name = "Truth-O-Meter", values = c("pants-fire" = "red", 
+                                                       "FALSE" = "orange",
+                                                       "barely-true" = "yellow",
+                                                       "half-true" = "yellowgreen",
+                                                       "mostly-true" = "green",
+                                                       "TRUE" = "blue")) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank())
+```
+
+The two topics that generate the most disparity between truth and fiction are *health* and *taxes*. This is my shocked face:
+
+```{r fig.align = 'center', echo = FALSE}
+include_graphics(here("images/astonished_face.png"))
+```
+
+3.  **Party Affiliation.**
+
+```{r}
+top4_parties <- c("democrat", "republican", "independent", "libertarian")
+
+top_parties <- liar_data %>% 
+  filter(Party %in% top4_parties) %>% 
+  group_by(Party, Label) %>% 
+  summarize(cnt = n()) %>% 
+  mutate(freq = round(cnt / sum(cnt), 2)) %>% 
+  arrange(desc(freq)) 
+
+top_parties %>% 
+  ggplot(aes(x= Label, y = freq, fill = Label,)) +
+  geom_col() +
+  facet_grid(~ Party) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(limits = c("TRUE", 
+                            "mostly-true",
+                            "half-true",
+                            "barely-true",
+                            "FALSE",
+                            "pants-fire")) +
+  labs(y = "% Statement Count", x = "", subtitle = "Truth by Party (Relative %)") +
+  scale_fill_manual(name = "Truth-O-Meter", values = c("pants-fire" = "red", 
+                                                       "FALSE" = "orange",
+                                                       "barely-true" = "yellow",
+                                                       "half-true" = "yellowgreen",
+                                                       "mostly-true" = "green",
+                                                       "TRUE" = "blue")) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank())
+
+```
+
+Not calling any names, but somebody's pants are on fire...at least in this data set. To summarize, this dataset has quite a few variables that when analyzed separately or in conjunction with each other may provide indicators of how truthful a statement is by source or discussion topic. However, to really understand the impact of each of these variables, we should judge them in the context of how they are used. This next section will analyze sentiment to explore any negativity bias in the text statements.
+
+## Model
+
+I've chosen to conduct sentiment analysis to attempt to identify additional metrics for misinformation. The dictionary I'll be using is the NRC lexicon from [Saif Mohammad and Peter Turney](http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm). This is a crowdsourced list of words and their associations with eight emotions (anger, fear, anticipation, trust, surprise, sadness, joy, and disgust) and two sentiments (negative and positive).
+
+```{r}
+# Download the lexicon
+nrc <- get_sentiments("nrc")
+
+sentiment_statements <- inner_join(subject_tokens, nrc, by = "word")
+summary_sentiment <- sentiment_statements %>% 
+  count(sentiment, sort = TRUE) %>%
+  spread(sentiment, n) %>%
+  mutate(sentiment = positive - negative) %>%
+  mutate(lexicon = "nrc") %>%
+  relocate(lexicon)
+
+sentiment_counts <- sentiment_statements %>% 
+  count(sentiment, sort = TRUE) 
+
+sentiment_counts %>%   
+  mutate(sentiment = reorder(sentiment,n)) %>%
+  ggplot(aes(n, sentiment)) +
+  geom_col() +
+  labs(x = "Counts", y = "Sentiment")
+```
+
+The large amount of ***trust*** and ***fear*** words are interesting. Though the lack of a huge difference between ***negative*** and ***positive*** words indicates that the overall tone is much more nuanced than just good vs. bad. Our last dive into the data will apply these sentiment results across our truth labels and political parties.
+
+```{r}
+sentiment_statements$Label <- factor(sentiment_statements$Label, 
+                                     levels = c("pants-fire",
+                                              "FALSE",
+                                              "barely-true",
+                                              "half-true",
+                                              "mostly-true",
+                                              "TRUE"))
+
+sentiment_statements %>%   
+  filter(Party %in% top4_parties) %>% 
+  ggplot(aes(y = sentiment, fill = Label)) +
+  geom_bar() +
+  facet_wrap(~ Party) +
+  labs(x = "Counts", y = "Sentiment", , subtitle = "Sentiment by Party (Raw Count)") +
+  scale_fill_manual(values = c("pants-fire" = "red", "FALSE" = "orange", "barely-true" = "yellow", "half-true" = "yellowgreen", "mostly-true" = "green", "TRUE" = "blue"))
+```
+
+```{r}
+sentiment_statements$Label <- factor(sentiment_statements$Label, 
+                                     levels = c("pants-fire",
+                                              "FALSE",
+                                              "barely-true",
+                                              "half-true",
+                                              "mostly-true",
+                                              "TRUE"))
+
+top_sentiments <- sentiment_statements %>% 
+  filter(Party %in% top4_parties) %>%
+  group_by(Party, sentiment) %>% 
+  summarize(cnt = n()) %>% 
+  mutate(freq = round(cnt / sum(cnt), 2)) %>% 
+  arrange(desc(freq)) 
+
+top_sentiments %>%
+  ggplot(aes(y = sentiment, x = freq, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_grid(~ Party) +
+  labs(x = "", y = "Sentiment", subtitle = "Sentiment by Party (Relative %)") +
+  scale_x_continuous(labels = scales::percent)
+```
+
+These graphs confirms the high use of "trust" words as a potential mask to issues or discussions that aren't always truthful. The highest rating of false statements (think yellow, orange, red), are in the sentiment categories of ***trust***, ***negative***, ***positive***, and ***fear***.
+
+## Communicate
+
+### *Conclusions*
+
+For humans to classify text manually, specific domain expertise is required. Expecting a person to maintain this type of knowledge across multiple domains in the digital age is nearly impossible. For the challenge of monitoring online news media for misinformation, the tasks include collecting the articles, ingesting their content, recognizing patterns in the data, and finally classifying the articles into categories. This case study demonstrates that all of these can be accomplished with current software and just a little bit of creativity.
+
+This exercise specifically looked at the ability to automate these tasks to assist in identifying metrics or key indicators whether text-based media is misinforming the public. Through just a few basic coding samples, numerous examples were discovered that could be pieced together to determine a posting's veracity.
+
+### *Additional Areas of Research*
+
+This case study examined a single type of online media, text. Similar exercises can be done with images or video, though translating them into a medium that could be analyzed like text would take a bit more computing power than most of have available to us.
+
+Beyond understanding these key metrics is applying them to machine learning models that could learn to predict an article's truthfulness, sentiment, or bias. Those efforts would enable applications and internet browser extensions that could notify people about the quality of material they consume online.
+
+### *Limitations*
+
+The data is always going to limit how generalizable these results are. Larger data sets will enable broader applications of the insights. For this data set, the text did not contain full, long-form articles. As a result, this study is probably better for social media analysis where the conversations are shorter. Computing power and coding skills are my personal limitation. Large text datasets can return very large tokenized data frames that take a while to run.
+
+### *Legal/Ethical Considerations*
+
+No personal information was collected or used for this case study. The data was generated and made available on a public facing website with this disclaimer:
+
+"The original sources retain the copyright of the data. Note that there are absolutely no guarantees with this data, and we provide this dataset "as is", but you are welcome to report the issues of the preliminary version of this data. You are allowed to use this dataset for research purposes only."
+
+### *Acknowledgements/References*
+
+1.  Breakstone, J., Smith, M., Wineburg, S., Rapaport, A., Carle, J., Garland, M., & Saavedra, A. (2019). Students' civic online reasoning: A national portrait. Stanford History Education Group & Gibson Consulting. <https://purl.stanford.edu/gf151tb4868>
+2.  Holan, A. (2020, October 27). *Politifact - the principles of the truth-O-meter: PolitiFact's methodology for independent fact-checking*. Politifact. Retrieved December 1, 2021, from <https://www.politifact.com/article/2018/feb/12/principles-truth-o-meter-politifacts-methodology-i/.>
+3.  Mohammad, S. (2011, July 10). *NRC Word-Emotion Association Lexicon*. Saif M. Mohammad Homepage. Retrieved December 1, 2021, from <http://saifmohammad.com/WebDocs/README-NRC-Lex.txt.>
+4.  Wang, W. Y. (2017). Liar, Liar Pants On fire: A new benchmark dataset for fake news detection. *Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics (Volume 2: Short Papers)*. <https://doi.org/10.18653/v1/p17-2067>
+5.  Wineburg, Sam and McGrew, Sarah and Breakstone, Joel and Ortega, Teresa. (2016). Evaluating Information: The Cornerstone of Civic Online Reasoning. Stanford Digital Repository. <http://purl.stanford.edu/fv751yt5934>
